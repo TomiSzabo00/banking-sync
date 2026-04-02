@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> This whole repo was vibecoded so read the code before you use it. I suggest starting with a sandbox or dev enviromnent where you can't cause any harm in your or your bank's systems. Use this code at your own risk.
+
 # Banking-Sync
 
 A self-hosted service that connects to your bank account through the [Enable Banking](https://enablebanking.com) API, automatically syncs transactions on a schedule, and notifies you via webhooks when events like salary payments are detected.
