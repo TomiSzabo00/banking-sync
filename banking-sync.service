@@ -1,0 +1,17 @@
+[Unit]
+Description=Banking-Sync — Enable Banking transaction sync service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__APP_DIR__
+ExecStart=__VENV_DIR__/bin/python app.py
+Restart=always
+RestartSec=5
+
+# Logging goes to journalctl; app.log is also written by the app itself
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

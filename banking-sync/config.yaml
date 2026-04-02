@@ -1,0 +1,84 @@
+# =============================================================================
+# Banking-Sync Configuration
+# Edit this file before starting the service for the first time.
+# =============================================================================
+
+enable_banking:
+  # Your application UUID — visible in the Enable Banking dashboard after creating the app
+  application_id: "YOUR_APPLICATION_ID"
+  
+  # Path to the RSA private key PEM downloaded when you registered the app
+  private_key_path: "/your/path/to/private.pem"
+  
+  # Base URL for the Enable Banking API. Don't change this.
+  base_url: "https://api.enablebanking.com"
+  
+  # Your bank. This example uses Raiffeisen Bank's sandbox.
+  # Pick your bank from the Enable Banking documentation.
+  aspsp_name: "YOUR_BANK_NAME"
+  country: "YOUR_COUNTRY_CODE"
+
+  # Some banks require extra credentials during the auth flow (e.g. userId, IBAN).
+  # Uncomment and fill in if your bank needs them; otherwise leave commented out.
+  # credentials:
+  #   userId: "your-user-id"
+  #   iban: "YOUR_IBAN"
+  #   currencyCode: "YOUR_CURRENCY"
+
+  # This must be reachable in your browser AFTER the banks's auth redirect.
+  # https may not be needed
+  redirect_url: "https://yourdomain.com/callback"
+
+sync:
+  # Fixed daily schedule in the configured timezone:
+  #   08:00 — morning      (catch overnight + early transactions)
+  #   13:30 — midday
+  #   18:30 — late afternoon
+  #   23:59 — end of day   (full day captured before midnight)
+  # Enable Banking enforces a maximum of 4 fetches per 24-hour period.
+  timezone: "UTC"
+  # Default currency used when the bank doesn't provide one
+  default_currency: "EUR"
+  # On first run, how many days back to fetch
+  initial_lookback_days: 30
+
+database:
+  # Relative paths are resolved from the working directory
+  path: "./data/transactions.db"
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  # Optional: set a secret key for the Flask session
+  secret_key: "your-secret-key"
+
+# =============================================================================
+# Salary Detection Rules
+# A transaction is flagged as salary if the debtor_name matches ANY entry below.
+# Matching is case-insensitive and checks for substring presence.
+#
+# If you don't need salary detection, comment out this section.
+# =============================================================================
+salary_detection:
+  debtor_names:
+    - "your-salary-sender-name"   # replace with actual sender name as it appears in bank
+
+# =============================================================================
+# Webhooks
+# Add entries here to receive HTTP POST notifications on events.
+#
+# Supported events:
+#   new_transaction   — fires for every new booked or pending transaction
+#   salary_detected   — fires when a salary transaction is identified
+#   sync_completed    — fires after each successful poll cycle
+#   auth_required     — fires when the session has expired (90-day limit)
+#
+# Optional HMAC signing:
+#   If "secret" is set, each request will include an
+#   X-Bank-Signature header: HMAC-SHA256(secret, request_body)
+# =============================================================================
+webhooks:
+  endpoints:
+    - url: "https://yourdomain.com/webhook/salary"
+      events:
+        - salary_detected
