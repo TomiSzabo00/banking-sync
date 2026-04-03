@@ -15,7 +15,7 @@ Authentication:
 import logging
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import jwt          # PyJWT
