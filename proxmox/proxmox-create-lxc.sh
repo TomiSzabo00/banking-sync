@@ -31,8 +31,8 @@ APP_USER="banking-sync"         # any username will do
 # ─────────────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_SOURCE="${SCRIPT_DIR}/banking-sync"
-SERVICE_FILE="${SCRIPT_DIR}/banking-sync.service"
+APP_SOURCE="${SCRIPT_DIR}/../banking-sync"
+SERVICE_FILE="${SCRIPT_DIR}/../banking-sync.service"
 TEMPLATE_PATH="${CT_TEMPLATE_STORAGE}:vztmpl/${CT_OS_TEMPLATE}"
 
 # ── Preflight checks ────────────────────────────────────────────────────────

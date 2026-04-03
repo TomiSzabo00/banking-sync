@@ -68,6 +68,9 @@ The compose file mounts `config.yaml` and `private.pem` as read-only, and persis
 
 If you run Proxmox, there's a script that creates a dedicated LXC container with everything pre-installed:
 
+> [!TIP]
+> You can copy the checked out repository from your computer to your Proxmox host with `scp -r banking-sync user@<proxmox-host ip>:/path/to/destination`
+
 ```bash
 # 1. Edit the variables at the top of the script (CT_ID, CT_IP, CT_GW, etc.)
 nano proxmox-create-lxc.sh
