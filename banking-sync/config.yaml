@@ -8,6 +8,7 @@ enable_banking:
   application_id: "YOUR_APPLICATION_ID"
   
   # Path to the RSA private key PEM downloaded when you registered the app
+  # On Proxmox, this should be "/opt/banking-sync/private.pem"
   private_key_path: "/your/path/to/private.pem"
   
   # Base URL for the Enable Banking API. Don't change this.
@@ -44,6 +45,7 @@ sync:
 
 database:
   # Relative paths are resolved from the working directory
+  # On Proxmox, this should be "/opt/banking-sync/data/transactions.db"
   path: "./data/transactions.db"
 
 server:
