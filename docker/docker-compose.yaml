@@ -1,0 +1,15 @@
+services:
+  banking-sync:
+    build: .
+    restart: always
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./banking-sync/config.yaml:/app/config.yaml:ro
+      - ./private.pem:/app/private.pem:ro
+      - data:/app/data
+      - logs:/app/logs
+
+volumes:
+  data:
+  logs:

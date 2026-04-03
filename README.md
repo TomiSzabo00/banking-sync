@@ -23,7 +23,7 @@ A self-hosted service that connects to your bank account through the [Enable Ban
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/banking-sync.git
+git clone https://github.com/TomiSzabo00/banking-sync.git
 cd banking-sync
 
 # 2. Edit the config
@@ -38,6 +38,28 @@ http://<YOUR_HOST_IP>:8080/auth/start
 ```
 
 After authenticating, the service begins syncing automatically. Sessions are valid for up to 90 days, after which you'll need to re-authenticate.
+
+### Docker
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/TomiSzabo00/banking-sync.git
+cd banking-sync
+
+# 2. Edit the config — set private_key_path to "/app/private.pem"
+nano banking-sync/config.yaml
+
+# 3. Place your private key in the repo root
+cp /path/to/your/private.pem ./private.pem
+
+# 4. Start the container
+docker compose up -d
+
+# 5. Authenticate (open in browser)
+http://<YOUR_HOST_IP>:8080/auth/start
+```
+
+The compose file mounts `config.yaml` and `private.pem` as read-only, and persists `data/` and `logs/` in named Docker volumes. The container restarts automatically on failure or host reboot.
 
 ## Configuration
 

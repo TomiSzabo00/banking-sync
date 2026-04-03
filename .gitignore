@@ -1,5 +1,6 @@
 .DS_Store
 *.pem
+docker-compose.override.yaml
 *.db
 data/
 logs/
