@@ -16,9 +16,9 @@ set -euo pipefail
 CT_ID=210                       # any free CT ID
 CT_HOSTNAME="banking-sync"      # hostname for the container
 CT_IP="192.168.1.60"            # IP address for the container
-CT_GW="192.168.1.1"             # gateway for the container (your router's IP, or the IP of your DNS server)
+CT_GW="192.168.1.1"             # gateway for the container (your router's IP)
 CT_CIDR="24"
-CT_DNS="192.168.1.1 8.8.8.8"    # space-separated: primary (router or DNS server) + fallback
+CT_DNS="192.168.1.1 8.8.8.8"    # space-separated: primary (DNS server if available) + fallback
 CT_STORAGE="local-lvm"          # storage pool for the container (yours may be different)
 CT_DISK_GB=4
 CT_RAM_MB=256
