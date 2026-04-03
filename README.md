@@ -64,6 +64,23 @@ http://<YOUR_HOST_IP>:8080/auth/start
 
 The compose file mounts `config.yaml` and `private.pem` as read-only, and persists `data/` and `logs/` in named Docker volumes. The container restarts automatically on failure or host reboot.
 
+### Proxmox LXC
+
+If you run Proxmox, there's a script that creates a dedicated LXC container with everything pre-installed:
+
+```bash
+# 1. Edit the variables at the top of the script (CT_ID, CT_IP, CT_GW, etc.)
+nano proxmox-create-lxc.sh
+
+# 2. Run it on the Proxmox HOST
+./proxmox-create-lxc.sh
+
+# 3. Edit config and push your private key (commands printed by the script)
+# 4. Start the service and authenticate
+```
+
+The script creates a minimal Debian 12 container, installs Python, sets up a dedicated service user, and enables the systemd service. It does **not** start the service — you need to edit the config and push your private key first.
+
 ## Configuration
 
 All configuration lives in `banking-sync/config.yaml`. Edit it before running `start.sh`.
