@@ -1,14 +1,19 @@
 """
-sync.py — Core polling, normalization, deduplication, and salary detection logic.
+sync.py — Stateless transaction fetching, normalization, and webhook firing.
 
-This module is called by APScheduler every N hours.
-It can also be triggered manually via the /api/sync/run endpoint.
+Two modes:
+  • run_sync()     — fetches today's transactions only (used by auto-sync)
+  • run_backfill() — fetches from a given date to today (manual trigger)
+
+No database, no deduplication. Every fetched transaction fires a webhook.
+Consumers are responsible for dedup using the `tx_hash` field in the payload.
 """
+import hashlib
 import json
 import logging
-from datetime import date, timedelta
+from datetime import date
 
-import db
+import session_store
 import webhooks
 from enablebanking_client import EnableBankingClient, EnableBankingError
 
@@ -17,11 +22,26 @@ logger = logging.getLogger(__name__)
 
 def run_sync(config: dict) -> dict:
     """
-    Main sync entry point. Pulls transactions for all known accounts,
-    deduplicates, persists, fires webhooks.
+    Fetch today's transactions for all known accounts and fire webhooks.
     Returns a summary dict.
     """
-    session = db.get_session()
+    return _run(config, date_from=date.today(), date_to=date.today())
+
+
+def run_backfill(config: dict, date_from: date | None = None) -> dict:
+    """
+    Fetch transactions from `date_from` (default: config backfill_from) to today.
+    Fires webhooks for every transaction found.
+    """
+    if date_from is None:
+        date_from = date.fromisoformat(
+            config.get("sync", {}).get("backfill_from", "2025-01-01")
+        )
+    return _run(config, date_from=date_from, date_to=date.today())
+
+
+def _run(config: dict, date_from: date, date_to: date) -> dict:
+    session = session_store.get_session()
     if not session:
         logger.warning("No active session — re-authentication required")
         webhooks.fire_auth_required()
@@ -33,44 +53,40 @@ def run_sync(config: dict) -> dict:
     )
     access_token = session["access_token"]
     salary_names = [n.lower() for n in config.get("salary_detection", {}).get("debtor_names", [])]
-    lookback_days = config["sync"].get("initial_lookback_days", 30)
     default_currency = config.get("sync", {}).get("default_currency", "EUR")
 
-    summary = {"accounts_synced": 0, "new_transactions": 0, "errors": []}
-
-    # ── 1. Discover accounts if we don't have them yet ─────────────────────────
-    accounts = db.get_accounts()
+    accounts = session_store.get_accounts()
     if not accounts:
-        logger.info("No accounts in DB — fetching from Enable Banking...")
+        logger.info("No accounts stored — fetching from Enable Banking...")
         try:
             raw_accounts = client.get_accounts(access_token)
-            for raw in raw_accounts:
-                acc = _normalize_account(raw)
-                db.save_account(acc)
-            accounts = db.get_accounts()
+            accounts = [_normalize_account(raw) for raw in raw_accounts]
+            session_store.save_accounts(accounts)
             logger.info("Discovered %d account(s)", len(accounts))
         except EnableBankingError as exc:
             if exc.status_code == 401:
-                db.clear_session()
+                session_store.clear_session()
                 webhooks.fire_auth_required()
                 return {"error": "session_expired"}
             return {"error": str(exc)}
 
-    # ── 2. For each account, fetch and process transactions ────────────────────
+    summary = {"accounts_synced": 0, "transactions_fired": 0, "errors": []}
+
     for account in accounts:
         uid = account["uid"]
         try:
-            new_count, fetched = _sync_account(
-                client, access_token, uid, salary_names, lookback_days, default_currency
+            count, fetched = _sync_account(
+                client, access_token, uid, date_from, date_to,
+                salary_names, default_currency,
             )
             summary["accounts_synced"] += 1
-            summary["new_transactions"] += new_count
-            webhooks.fire_sync_completed(uid, new_count, fetched)
-            logger.info("Account %s — %d new of %d fetched", uid, new_count, fetched)
+            summary["transactions_fired"] += count
+            webhooks.fire_sync_completed(uid, count, fetched)
+            logger.info("Account %s — %d transactions fired (%d fetched)", uid, count, fetched)
         except EnableBankingError as exc:
             logger.error("Sync error for account %s: %s", uid, exc)
             if exc.status_code == 401:
-                db.clear_session()
+                session_store.clear_session()
                 webhooks.fire_auth_required()
                 return {"error": "session_expired"}
             summary["errors"].append({"account_uid": uid, "error": str(exc)})
@@ -82,64 +98,34 @@ def _sync_account(
     client: EnableBankingClient,
     access_token: str,
     account_uid: str,
+    date_from: date,
+    date_to: date,
     salary_names: list[str],
-    lookback_days: int,
     default_currency: str = "EUR",
 ) -> tuple[int, int]:
     """
-    Fetch, normalize, deduplicate and persist transactions for one account.
-    Returns (new_transaction_count, total_fetched_count).
+    Fetch, normalize, and fire webhooks for all transactions in the date range.
+    Returns (webhooks_fired_count, total_fetched_count).
     """
-    state = db.get_sync_state(account_uid)
-
-    # Use last booked date as cursor; fall back to lookback window on first run
-    if state and state.get("last_booked_date"):
-        # Overlap by 2 days to catch late-posting transactions
-        date_from = date.fromisoformat(state["last_booked_date"]) - timedelta(days=2)
-    else:
-        date_from = date.today() - timedelta(days=lookback_days)
-
-    date_to = date.today()
-
-    if state and state.get("last_booked_date"):
-        raw = client.get_transactions(access_token, account_uid, date_from=date_from, date_to=date_to)
-    else:
-        raw = client.get_transactions(access_token, account_uid)
+    raw = client.get_transactions(access_token, account_uid, date_from=date_from, date_to=date_to)
 
     all_txs = raw.get("transactions", [])
     booked_txs = [t for t in all_txs if t.get("status") == "BOOK"]
     pending_txs = [t for t in all_txs if t.get("status") == "PDNG"]
     total_fetched = len(booked_txs) + len(pending_txs)
 
-    new_count = 0
-    latest_booked_date: str | None = state["last_booked_date"] if state else None
+    fired_count = 0
 
-    for raw_tx in booked_txs:
-        tx = _normalize_tx(raw_tx, account_uid, status="booked", default_currency=default_currency)
+    for raw_tx in booked_txs + pending_txs:
+        status = "booked" if raw_tx.get("status") == "BOOK" else "pending"
+        tx = _normalize_tx(raw_tx, account_uid, status=status, default_currency=default_currency)
         tx["is_salary"] = _is_salary(tx, salary_names)
-        is_new = db.upsert_transaction(tx)
-        if is_new:
-            new_count += 1
-            webhooks.fire_new_transaction(tx)
-            if tx["is_salary"]:
-                webhooks.fire_salary_detected(tx)
-            # Track latest booking date for next cursor
-            bd = tx.get("booking_date")
-            if bd and (latest_booked_date is None or bd > latest_booked_date):
-                latest_booked_date = bd
+        webhooks.fire_new_transaction(tx)
+        fired_count += 1
+        if tx["is_salary"]:
+            webhooks.fire_salary_detected(tx)
 
-    for raw_tx in pending_txs:
-        tx = _normalize_tx(raw_tx, account_uid, status="pending", default_currency=default_currency)
-        tx["is_salary"] = _is_salary(tx, salary_names)
-        is_new = db.upsert_transaction(tx)
-        if is_new:
-            new_count += 1
-            webhooks.fire_new_transaction(tx)
-            if tx["is_salary"]:
-                webhooks.fire_salary_detected(tx)
-
-    db.update_sync_state(account_uid, last_booked_date=latest_booked_date)
-    return new_count, total_fetched
+    return fired_count, total_fetched
 
 
 def _normalize_tx(raw: dict, account_uid: str, status: str, default_currency: str = "EUR") -> dict:
@@ -175,8 +161,10 @@ def _normalize_tx(raw: dict, account_uid: str, status: str, default_currency: st
 
     bank_id = raw.get("transaction_id") or raw.get("transactionId") or raw.get("entry_reference")
 
+    tx_hash = _make_tx_hash(amount, booking_date, debtor_name, creditor_name, reference)
+
     return {
-        "hash": db.make_tx_hash(amount, booking_date, debtor_name, creditor_name, reference),
+        "tx_hash": tx_hash,
         "bank_id": bank_id,
         "account_uid": account_uid,
         "amount": amount,
@@ -200,7 +188,6 @@ def _normalize_account(raw: dict) -> dict:
         "iban": iban_data.get("iban") or raw.get("iban"),
         "currency": raw.get("currency"),
         "name": raw.get("name") or raw.get("product"),
-        "raw_json": json.dumps(raw),
     }
 
 
@@ -209,3 +196,9 @@ def _is_salary(tx: dict, salary_names: list[str]) -> bool:
         return False
     debtor = (tx.get("debtor_name") or "").lower()
     return any(name in debtor for name in salary_names)
+
+
+def _make_tx_hash(amount, booking_date, debtor_name, creditor_name, reference) -> str:
+    """Deterministic hash for consumer-side deduplication."""
+    composite = f"{amount}|{booking_date or ''}|{debtor_name or ''}|{creditor_name or ''}|{reference or ''}"
+    return hashlib.sha256(composite.encode()).hexdigest()

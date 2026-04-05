@@ -3,17 +3,17 @@
 
 # Banking-Sync
 
-A self-hosted service that connects to your bank account through the [Enable Banking](https://enablebanking.com) API, automatically syncs transactions on a schedule, and notifies you via webhooks when events like salary payments are detected.
+A self-hosted, lightweight service that connects to your bank account through the [Enable Banking](https://enablebanking.com) API, fetches transactions, and notifies you via webhooks. It does **not** store transactions — it fires webhook events and forgets.
 
 ## Features
 
-- **Automatic transaction sync** — polls your bank up to 4 times per day (the Enable Banking maximum) on a configurable schedule
+- **On-demand backfill** — manually trigger a full historical sync going back as far as the API (or your bank) allows
+- **Daily transaction sync** — optional 4x/day auto-sync that fetches only today's transactions
 - **Salary detection** — flags incoming transactions from configured sender names and fires a webhook
 - **Webhook notifications** — receive HTTP POST callbacks for new transactions, salary detection, sync completion, and session expiry
 - **HMAC-signed webhooks** — optionally sign webhook payloads with a shared secret for verification
-- **REST API** — query transactions, accounts, sync status, and manage webhooks programmatically
-- **SQLite storage** — zero-dependency persistence with WAL mode for safe concurrent reads
-- **Deduplication** — content-based hashing survives pending-to-booked state transitions without creating duplicates
+- **Stateless design** — no database; only a small JSON file for the session token and account list
+- **Consumer-side dedup** — every webhook payload includes a `tx_hash` field so consumers can deduplicate
 - **Systemd integration** — runs as a system service with automatic restart on failure
 
 ## Prerequisites
@@ -36,11 +36,22 @@ nano banking-sync/config.yaml
 ./start.sh
 
 # 4. Authenticate with your bank (open in browser)
-#    The URL is printed in the logs, or just visit:
 http://<YOUR_HOST_IP>:8080/auth/start
+
+# 5. Run a historical backfill (fetches from 2025-01-01 by default)
+curl -X POST http://localhost:8080/api/sync/backfill
+
+# 6. Optionally enable auto-sync (4x/day, today's transactions only)
+curl -X POST http://localhost:8080/api/sync/enable
 ```
 
-After authenticating, the service begins syncing automatically. Sessions are valid for up to 90 days, after which you'll need to re-authenticate.
+After authenticating, the service is ready but **does not sync automatically**. You control when syncing happens:
+
+- **Backfill** — `POST /api/sync/backfill` for historical data
+- **Manual sync** — `POST /api/sync/run` for today's transactions
+- **Auto-sync** — `POST /api/sync/enable` to start the 4x/day schedule
+
+Sessions are valid for up to 90 days, after which you'll need to re-authenticate.
 
 ### Docker
 
@@ -109,16 +120,16 @@ Some banks require additional credentials during the auth flow. If yours does, u
     currencyCode: "YOUR_CURRENCY"
 ```
 
-### Sync schedule
+### Sync settings
 
 ```yaml
 sync:
-  timezone: "Europe/Berlin"    # Your local timezone (IANA format)
-  default_currency: "EUR"      # Fallback when the bank doesn't provide one
-  initial_lookback_days: 30    # How far back to fetch on first run
+  timezone: "Europe/Berlin"      # Your local timezone (IANA format)
+  default_currency: "EUR"        # Fallback when the bank doesn't provide one
+  backfill_from: "2025-01-01"    # Default start date for POST /api/sync/backfill
 ```
 
-The service syncs at **08:00, 13:30, 18:30, and 23:59** in your configured timezone. These times are hardcoded to stay within the 4-request daily limit imposed by Enable Banking.
+When auto-sync is enabled, it runs at **08:00, 13:30, 18:30, and 23:59** in your configured timezone, fetching only today's transactions each time. These times are hardcoded to stay within the 4-request daily limit imposed by Enable Banking.
 
 ### Salary detection
 
@@ -141,13 +152,13 @@ webhooks:
       secret: "optional-hmac-secret"  # Adds X-Bank-Signature header
 ```
 
-Webhooks can also be managed at runtime via the API (see below).
+Webhooks are configured in `config.yaml` only — there is no runtime registration API.
 
 ### Other settings
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `database.path` | `./data/transactions.db` | SQLite database location |
+| `session.path` | `./data/session.json` | Session token + accounts JSON file |
 | `server.host` | `0.0.0.0` | Flask bind address |
 | `server.port` | `8080` | Flask port |
 | `server.secret_key` | `changeme` | Flask session secret |
@@ -162,49 +173,37 @@ Webhooks can also be managed at runtime via the API (see below).
 | `GET` | `/callback` | OAuth callback (handled automatically by the bank redirect) |
 | `GET` | `/auth/status` | Check if a session is active and when it expires |
 
-### Transactions
+### Sync Control
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/transactions` | List transactions (see query params below) |
-| `GET` | `/api/accounts` | List discovered bank accounts |
-| `GET` | `/api/sync/status` | Last sync timestamp per account |
-| `POST` | `/api/sync/run` | Manually trigger a sync cycle |
+| `POST` | `/api/sync/run` | Manually trigger a sync (today's transactions only) |
+| `POST` | `/api/sync/backfill` | Fetch historical transactions (see params below) |
+| `POST` | `/api/sync/enable` | Start the 4x/day auto-sync schedule |
+| `POST` | `/api/sync/disable` | Stop auto-sync |
+| `GET` | `/api/sync/status` | Check if auto-sync is enabled |
 
-**Transaction query parameters:**
+**Backfill parameters** (query string or JSON body):
 
-| Param | Type | Description |
-|-------|------|-------------|
-| `account` | string | Filter by account UID |
-| `status` | string | `booked` or `pending` |
-| `salary` | string | `true` or `false` |
-| `limit` | int | Max results (default 100, max 500) |
-| `offset` | int | Pagination offset |
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `date_from` | string (ISO date) | `config.sync.backfill_from` | How far back to fetch (e.g. `2025-01-01`) |
 
-### Webhooks
+Example:
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/webhooks` | List registered webhooks |
-| `POST` | `/api/webhooks` | Register a new webhook |
-| `DELETE` | `/api/webhooks/<id>` | Remove a webhook |
+```bash
+# Backfill from start of 2025
+curl -X POST "http://localhost:8080/api/sync/backfill?date_from=2025-01-01"
 
-**Create webhook body:**
-
-```json
-{
-  "url": "https://example.com/hook",
-  "events": ["salary_detected", "new_transaction"],
-  "secret": "optional-hmac-key"
-}
+# Backfill using the default date from config.yaml
+curl -X POST http://localhost:8080/api/sync/backfill
 ```
 
-### Other
+### Health
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/health` | Liveness probe (`{"status": "ok"}`) |
-| `POST` | `/api/debug/inject-transaction` | Inject a fake transaction for testing |
 
 ## Webhook Events
 
@@ -220,10 +219,13 @@ Every webhook payload follows this structure:
 
 | Event | Fires when | Data |
 |-------|-----------|------|
-| `new_transaction` | A new transaction is synced | Transaction object |
+| `new_transaction` | A transaction is fetched (every sync) | Transaction object with `tx_hash` |
 | `salary_detected` | A transaction matches salary rules | `{"transaction": {...}}` |
 | `sync_completed` | A sync cycle finishes | `{"account_uid", "new_transactions", "total_fetched"}` |
 | `auth_required` | The session has expired | `{"message": "..."}` |
+
+> [!NOTE]
+> Since there is no server-side deduplication, `new_transaction` fires for **every** fetched transaction on each sync. Regular syncs only fetch today, so duplicates are limited to the same day. Use the `tx_hash` field to deduplicate on the consumer side.
 
 If a `secret` is configured, each request includes an `X-Bank-Signature` header containing the HMAC-SHA256 hex digest of the raw JSON body.
 
@@ -231,17 +233,17 @@ If a `secret` is configured, each request includes an `X-Bank-Signature` header 
 
 ```
 banking-sync/
-  app.py                  # Entry point — Flask server + APScheduler
-  api.py                  # REST API routes
-  sync.py                 # Transaction polling, normalization, deduplication
+  app.py                  # Entry point — Flask server + APScheduler (off by default)
+  api.py                  # REST API routes (auth, sync control)
+  sync.py                 # Transaction fetching, normalization, webhook firing
   enablebanking_client.py # Enable Banking HTTP client (JWT auth)
-  db.py                   # SQLite persistence layer
-  webhooks.py             # Webhook dispatch engine
+  session_store.py        # Minimal JSON-file persistence (session + accounts)
+  webhooks.py             # Webhook dispatch (config-driven)
   config.yaml             # Configuration (edit this)
   requirements.txt        # Python dependencies
 ```
 
-**Data flow:** APScheduler triggers `sync.py` on schedule. It fetches transactions via `enablebanking_client.py`, normalizes and deduplicates them, persists to SQLite via `db.py`, and fires webhook events via `webhooks.py`. The Flask server in `api.py` handles the OAuth flow and exposes the REST API.
+**Data flow:** You trigger a sync (manually or via auto-schedule). `sync.py` fetches transactions via `enablebanking_client.py`, normalizes them, and fires webhook events via `webhooks.py`. Nothing is stored — the only persistent state is the session token and account list in `data/session.json`.
 
 ## Managing the Service
 

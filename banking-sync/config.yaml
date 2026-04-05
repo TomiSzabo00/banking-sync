@@ -1,19 +1,19 @@
 # =============================================================================
-# Banking-Sync Configuration
+# Banking-Sync Configuration (Lightweight / Stateless Mode)
 # Edit this file before starting the service for the first time.
 # =============================================================================
 
 enable_banking:
   # Your application UUID — visible in the Enable Banking dashboard after creating the app
   application_id: "YOUR_APPLICATION_ID"
-  
+
   # Path to the RSA private key PEM downloaded when you registered the app
   # On Proxmox, this should be "/opt/banking-sync/private.pem"
   private_key_path: "/your/path/to/private.pem"
-  
+
   # Base URL for the Enable Banking API. Don't change this.
   base_url: "https://api.enablebanking.com"
-  
+
   # Your bank. This example uses Raiffeisen Bank's sandbox.
   # Pick your bank from the Enable Banking documentation.
   aspsp_name: "YOUR_BANK_NAME"
@@ -31,22 +31,17 @@ enable_banking:
   redirect_url: "https://yourdomain.com/callback"
 
 sync:
-  # Fixed daily schedule in the configured timezone:
-  #   08:00 — morning      (catch overnight + early transactions)
-  #   13:30 — midday
-  #   18:30 — late afternoon
-  #   23:59 — end of day   (full day captured before midnight)
-  # Enable Banking enforces a maximum of 4 fetches per 24-hour period.
+  # Timezone for the 4x/day auto-sync schedule (off by default).
+  # Enable via POST /api/sync/enable
   timezone: "UTC"
   # Default currency used when the bank doesn't provide one
   default_currency: "EUR"
-  # On first run, how many days back to fetch
-  initial_lookback_days: 30
+  # Default start date for backfill (POST /api/sync/backfill)
+  backfill_from: "2025-01-01"
 
-database:
-  # Relative paths are resolved from the working directory
-  # On Proxmox, this should be "/opt/banking-sync/data/transactions.db"
-  path: "./data/transactions.db"
+# Session token + accounts are persisted in a simple JSON file
+session:
+  path: "./data/session.json"
 
 server:
   host: "0.0.0.0"
@@ -68,12 +63,15 @@ salary_detection:
 # =============================================================================
 # Webhooks
 # Add entries here to receive HTTP POST notifications on events.
+# This is the ONLY way to register webhooks (no runtime API).
 #
 # Supported events:
-#   new_transaction   — fires for every new booked or pending transaction
+#   new_transaction   — fires for every fetched transaction (booked or pending)
 #   salary_detected   — fires when a salary transaction is identified
-#   sync_completed    — fires after each successful poll cycle
+#   sync_completed    — fires after each successful sync cycle
 #   auth_required     — fires when the session has expired (90-day limit)
+#
+# Each transaction payload includes a `tx_hash` field for consumer-side dedup.
 #
 # Optional HMAC signing:
 #   If "secret" is set, each request will include an

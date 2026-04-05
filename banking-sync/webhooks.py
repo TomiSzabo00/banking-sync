@@ -1,6 +1,9 @@
 """
 webhooks.py — Dispatch events to registered HTTP endpoints.
 
+Endpoints are loaded from config.yaml at init time. No database, no runtime
+registration — config.yaml is the single source of truth.
+
 Payload structure for every event:
 {
   "event":     "new_transaction" | "salary_detected" | "sync_completed" | "auth_required",
@@ -19,21 +22,27 @@ from datetime import datetime, timezone
 
 import requests
 
-import db
-
 logger = logging.getLogger(__name__)
 
 TIMEOUT_SECONDS = 10
 
+_endpoints: list[dict] = []
+
+
+def init(config: dict) -> None:
+    """Load webhook endpoints from config.yaml."""
+    global _endpoints
+    _endpoints = config.get("webhooks", {}).get("endpoints", []) or []
+    logger.info("Loaded %d webhook endpoint(s) from config", len(_endpoints))
+
 
 def fire(event: str, data: dict) -> None:
     """
-    Find all webhooks subscribed to `event` and deliver the payload.
-    Failures are logged but never raise — sync must not be interrupted by a
-    flaky downstream service.
+    Deliver payload to all endpoints subscribed to `event`.
+    Failures are logged but never raise — sync must not be interrupted.
     """
-    endpoints = db.get_webhooks(event=event)
-    if not endpoints:
+    matching = [ep for ep in _endpoints if event in ep.get("events", [])]
+    if not matching:
         return
 
     payload = {
@@ -43,14 +52,13 @@ def fire(event: str, data: dict) -> None:
     }
     body = json.dumps(payload, default=str)
 
-    for endpoint in endpoints:
+    for endpoint in matching:
         _deliver(endpoint, event, body)
 
 
 def _deliver(endpoint: dict, event: str, body: str) -> None:
     url = endpoint["url"]
     secret = endpoint.get("secret")
-    webhook_id = endpoint["id"]
 
     headers = {"Content-Type": "application/json", "X-Bank-Event": event}
     if secret:
@@ -60,16 +68,13 @@ def _deliver(endpoint: dict, event: str, body: str) -> None:
     try:
         resp = requests.post(url, data=body, headers=headers, timeout=TIMEOUT_SECONDS)
         logger.info("Webhook %s → %s: HTTP %s", event, url, resp.status_code)
-        db.log_delivery(webhook_id, event, body, resp.status_code, None)
     except requests.RequestException as exc:
         logger.warning("Webhook %s → %s failed: %s", event, url, exc)
-        db.log_delivery(webhook_id, event, body, None, str(exc))
 
 
 # ── Convenience fire functions ────────────────────────────────────────────────
 
 def fire_new_transaction(tx: dict) -> None:
-    # Strip raw_json to keep webhook payload clean
     clean = {k: v for k, v in tx.items() if k != "raw_json"}
     fire("new_transaction", clean)
 

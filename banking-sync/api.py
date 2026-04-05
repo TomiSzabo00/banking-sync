@@ -2,40 +2,34 @@
 api.py — Flask routes:
 
   Auth flow (browser-driven):
-    GET  /auth/start          → initiates OAuth, redirects browser to the actual bank's OAuth page
+    GET  /auth/start          → initiates OAuth, redirects browser to the bank's OAuth page
     GET  /callback            → receives the OAuth code from the bank's redirect
     GET  /auth/status         → check if a session is active
 
-  Data:
-    GET  /api/transactions    → query transactions (filters: account, status, salary, limit, offset)
-    GET  /api/accounts        → list known accounts
-    GET  /api/sync/status     → last sync info per account
+  Sync control:
+    POST /api/sync/run        → manually trigger a sync (today's transactions)
+    POST /api/sync/backfill   → fetch historical transactions from a given date
+    POST /api/sync/enable     → start the 4x/day auto-sync schedule
+    POST /api/sync/disable    → stop auto-sync
+    GET  /api/sync/status     → check if auto-sync is enabled
 
-  Webhooks:
-    GET    /api/webhooks       → list registered webhooks
-    POST   /api/webhooks       → register a new webhook
-    DELETE /api/webhooks/<id>  → remove a webhook
-
-  Admin:
-    POST /api/sync/run        → manually trigger a sync cycle
+  Health:
     GET  /health              → liveness probe
 """
-import json
 import logging
 import threading
+from datetime import date
 
 from markupsafe import escape
 from flask import Blueprint, current_app, jsonify, redirect, request
 
-import db
+import session_store
 import sync as sync_module
-import webhooks as wh_module
 from enablebanking_client import EnableBankingClient
 
 logger = logging.getLogger(__name__)
 bp = Blueprint("api", __name__)
 
-# Shared state for the OAuth dance (authorization_id is short-lived)
 _pending_auth: dict = {}
 _sync_lock = threading.Lock()
 
@@ -44,7 +38,7 @@ _sync_lock = threading.Lock()
 
 @bp.get("/health")
 def health():
-    session = db.get_session()
+    session = session_store.get_session()
     return jsonify({
         "status": "ok",
         "session_active": session is not None,
@@ -55,7 +49,6 @@ def health():
 
 @bp.get("/auth/start")
 def auth_start():
-    """Initiate the OAuth flow. Visit this in a browser."""
     cfg = current_app.config["APP_CONFIG"]
     eb = cfg["enable_banking"]
     client = EnableBankingClient(
@@ -79,18 +72,12 @@ def auth_start():
 
     _pending_auth["authorization_id"] = authorization_id
     logger.info("Auth initiated — authorization_id=%s", authorization_id)
-    logger.info("Redirecting user to Enable Banking auth URL")
 
-    # Redirect the browser to the bank's auth page
     return redirect(redirect_url)
 
 
 @bp.get("/callback")
 def oauth_callback():
-    """
-    Enable Banking redirects here after SCA approval.
-    Query params: code=<authorization_code>&state=bank-sync-oauth
-    """
     code = request.args.get("code")
     error = request.args.get("error")
 
@@ -122,15 +109,19 @@ def oauth_callback():
     expires_at = session_data.get("access", {}).get("valid_until")
     authorization_id = _pending_auth.get("authorization_id")
 
-    db.save_session(access_token, expires_at=expires_at, authorization_id=authorization_id)
-    accounts = session_data.get("accounts", [])
-    for raw in accounts:
-        db.save_account(sync_module._normalize_account(raw))
+    accounts = [sync_module._normalize_account(raw) for raw in session_data.get("accounts", [])]
+
+    session_store.save_session(
+        access_token,
+        expires_at=expires_at,
+        authorization_id=authorization_id,
+        accounts=accounts,
+    )
 
     logger.info("Session saved — expires_at=%s, accounts=%d", expires_at, len(accounts))
 
     return f"""
-    <h2>✅ Authentication Successful</h2>
+    <h2>Authentication Successful</h2>
     <p><strong>Session valid until:</strong> {expires_at or 'up to 90 days'}</p>
     <p>You can close this tab.</p>
     <p><a href="/auth/status">Check auth status</a></p>
@@ -139,69 +130,18 @@ def oauth_callback():
 
 @bp.get("/auth/status")
 def auth_status():
-    session = db.get_session()
+    session = session_store.get_session()
     if not session:
         return jsonify({"authenticated": False, "message": "No active session. Visit /auth/start"})
     return jsonify({
         "authenticated": True,
         "expires_at": session.get("expires_at"),
-        "created_at": session.get("created_at"),
         "authorization_id": session.get("authorization_id"),
+        "accounts": len(session.get("accounts", [])),
     })
 
 
-# ── Transactions ───────────────────────────────────────────────────────────────
-
-@bp.get("/api/transactions")
-def get_transactions():
-    account_uid = request.args.get("account")
-    status = request.args.get("status")             # booked | pending
-    is_salary_param = request.args.get("salary")    # true | false
-    limit = min(int(request.args.get("limit", 100)), 500)
-    offset = int(request.args.get("offset", 0))
-
-    is_salary = None
-    if is_salary_param is not None:
-        is_salary = is_salary_param.lower() == "true"
-
-    txs = db.get_transactions(
-        account_uid=account_uid,
-        status=status,
-        is_salary=is_salary,
-        limit=limit,
-        offset=offset,
-    )
-    # Strip raw_json from API responses
-    for tx in txs:
-        tx.pop("raw_json", None)
-
-    return jsonify({"transactions": txs, "count": len(txs), "offset": offset})
-
-
-@bp.get("/api/accounts")
-def get_accounts():
-    accounts = db.get_accounts()
-    for acc in accounts:
-        acc.pop("raw_json", None)
-    return jsonify({"accounts": accounts})
-
-
-@bp.get("/api/sync/status")
-def sync_status():
-    accounts = db.get_accounts()
-    result = []
-    for acc in accounts:
-        state = db.get_sync_state(acc["uid"])
-        result.append({
-            "account_uid": acc["uid"],
-            "iban": acc.get("iban"),
-            "last_sync_at": state["last_sync_at"] if state else None,
-            "last_booked_date": state["last_booked_date"] if state else None,
-        })
-    return jsonify(result)
-
-
-# ── Manual sync trigger ────────────────────────────────────────────────────────
+# ── Sync control ──────────────────────────────────────────────────────────────
 
 @bp.post("/api/sync/run")
 def manual_sync():
@@ -215,101 +155,50 @@ def manual_sync():
         _sync_lock.release()
 
 
-# ── Webhooks ───────────────────────────────────────────────────────────────────
-
-VALID_EVENTS = {"new_transaction", "salary_detected", "sync_completed", "auth_required"}
-
-
-@bp.get("/api/webhooks")
-def list_webhooks():
-    hooks = db.get_webhooks()
-    for h in hooks:
-        h.pop("secret", None)   # don't expose secrets
-        h["events"] = json.loads(h["events"])
-    return jsonify({"webhooks": hooks})
-
-
-@bp.post("/api/webhooks")
-def create_webhook():
-    body = request.get_json(silent=True) or {}
-    url = body.get("url", "").strip()
-    events = body.get("events", [])
-    secret = body.get("secret")
-
-    if not url:
-        return jsonify({"error": "url is required"}), 400
-    if not events:
-        return jsonify({"error": "events list is required"}), 400
-
-    unknown = set(events) - VALID_EVENTS
-    if unknown:
-        return jsonify({"error": f"Unknown events: {unknown}. Valid: {VALID_EVENTS}"}), 400
-
-    wh_id = db.add_webhook(url, events, secret)
-    return jsonify({"id": wh_id, "url": url, "events": events}), 201
+@bp.post("/api/sync/backfill")
+def backfill():
+    if not _sync_lock.acquire(blocking=False):
+        return jsonify({"error": "sync_already_running"}), 409
+    try:
+        cfg = current_app.config["APP_CONFIG"]
+        date_from_str = request.args.get("date_from")
+        if not date_from_str and request.is_json:
+            date_from_str = request.json.get("date_from")
+        date_from = date.fromisoformat(date_from_str) if date_from_str else None
+        result = sync_module.run_backfill(cfg, date_from=date_from)
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"error": f"Invalid date_from: {exc}"}), 400
+    finally:
+        _sync_lock.release()
 
 
-@bp.delete("/api/webhooks/<int:webhook_id>")
-def delete_webhook(webhook_id: int):
-    db.delete_webhook(webhook_id)
-    return jsonify({"deleted": webhook_id})
-
-
-
-@bp.post("/api/debug/inject-transaction")
-def inject_transaction():
-    """
-    Inject a fake transaction through the full pipeline — normalization,
-    deduplication, salary detection, and webhook firing.
-    Body fields (all optional, sensible defaults provided):
-      amount, currency, status, booking_date, debtor_name, description, is_salary
-    """
-    from datetime import date
-
-    body = request.get_json(silent=True, force=True) or {}
-
+@bp.post("/api/sync/enable")
+def enable_auto_sync():
+    from app import start_scheduler, _scheduler_ref
     cfg = current_app.config["APP_CONFIG"]
-    salary_names = [n.lower() for n in cfg.get("salary_detection", {}).get("debtor_names", [])]
+    if _scheduler_ref.get("scheduler") and _scheduler_ref["scheduler"].running:
+        return jsonify({"auto_sync": "already_enabled"})
+    scheduler = start_scheduler(cfg)
+    _scheduler_ref["scheduler"] = scheduler
+    return jsonify({"auto_sync": "enabled"})
 
-    accounts = db.get_accounts()
-    if not accounts:
-        return jsonify({"error": "no_accounts"}), 400
 
-    account_uid = body.get("account_uid") or accounts[0]["uid"]
-    debtor_name = body.get("debtor_name", "TEST EMPLOYER")
-    default_currency = cfg.get("sync", {}).get("default_currency", "EUR")
-    amount = float(body.get("amount", 1000.0))
-    currency = body.get("currency", default_currency)
-    status = body.get("status", "booked")
-    booking_date = body.get("booking_date", date.today().isoformat())
-    description = body.get("description", "SALARY TEST")
+@bp.post("/api/sync/disable")
+def disable_auto_sync():
+    from app import _scheduler_ref
+    scheduler = _scheduler_ref.get("scheduler")
+    if scheduler and scheduler.running:
+        scheduler.shutdown(wait=False)
+        _scheduler_ref["scheduler"] = None
+        return jsonify({"auto_sync": "disabled"})
+    return jsonify({"auto_sync": "already_disabled"})
 
-    tx = {
-        "hash": db.make_tx_hash(amount, booking_date, debtor_name, "", description),
-        "bank_id": None,
-        "account_uid": account_uid,
-        "amount": amount,
-        "currency": currency,
-        "status": status,
-        "booking_date": booking_date,
-        "value_date": None,
-        "debtor_name": debtor_name,
-        "creditor_name": None,
-        "reference": description,
-        "description": description,
-        "raw_json": None,
-    }
-    tx["is_salary"] = sync_module._is_salary(tx, salary_names)
 
-    is_new = db.upsert_transaction(tx)
-    if is_new:
-        wh_module.fire_new_transaction(tx)
-        if tx["is_salary"]:
-            wh_module.fire_salary_detected(tx)
-
+@bp.get("/api/sync/status")
+def sync_status():
+    from app import _scheduler_ref
+    scheduler = _scheduler_ref.get("scheduler")
     return jsonify({
-        "injected": is_new,
-        "duplicate": not is_new,
-        "is_salary": tx["is_salary"],
-        "transaction": {k: v for k, v in tx.items() if k != "raw_json"},
+        "auto_sync_enabled": bool(scheduler and scheduler.running),
     })
