@@ -105,16 +105,39 @@ class EnableBankingClient:
         date_from: date | None = None,
         date_to: date | None = None,
     ) -> dict:
+        """
+        Fetch all transactions for the given date range, following
+        continuation_key pagination until exhausted.
+        """
         params: dict = {}
         if date_from:
             params["date_from"] = date_from.isoformat()
         if date_to:
             params["date_to"] = date_to.isoformat()
-        return self._get(
-            f"/accounts/{account_uid}/transactions",
-            headers=self._session_headers(),
-            params=params,
-        )
+
+        all_transactions: list[dict] = []
+        page = 0
+
+        while True:
+            resp = self._get(
+                f"/accounts/{account_uid}/transactions",
+                headers=self._session_headers(),
+                params=params,
+            )
+
+            txs = resp.get("transactions", []) if isinstance(resp, dict) else []
+            all_transactions.extend(txs)
+            page += 1
+
+            continuation_key = resp.get("continuation_key") if isinstance(resp, dict) else None
+            if not continuation_key:
+                break
+
+            logger.debug("Continuation key received (page %d, %d txs so far)", page, len(all_transactions))
+            params["continuation_key"] = continuation_key
+
+        logger.info("Fetched %d transaction(s) across %d page(s) for account %s", len(all_transactions), page, account_uid)
+        return {"transactions": all_transactions}
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
