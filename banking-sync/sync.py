@@ -1,5 +1,5 @@
 """
-sync.py — Stateless transaction fetching, normalization, and webhook firing.
+sync.py — Stateless transaction fetching and webhook firing.
 
 Two modes:
   • run_sync()     — fetches today's transactions only (used by auto-sync)
@@ -7,10 +7,14 @@ Two modes:
 
 No database, no deduplication. Every fetched transaction fires a webhook.
 Consumers are responsible for dedup using the `tx_hash` field in the payload.
+
+Transaction payloads preserve the original Enable Banking / Berlin Group
+schema with keys normalised to snake_case. Extra fields (tx_hash, account_uid,
+is_salary) are added on top — nothing is renamed, flattened, or dropped.
 """
 import hashlib
-import json
 import logging
+import re
 from datetime import date
 
 import session_store
@@ -53,7 +57,6 @@ def _run(config: dict, date_from: date, date_to: date) -> dict:
     )
     access_token = session["access_token"]
     salary_names = [n.lower() for n in config.get("salary_detection", {}).get("debtor_names", [])]
-    default_currency = config.get("sync", {}).get("default_currency", "EUR")
 
     accounts = session_store.get_accounts()
     if not accounts:
@@ -77,7 +80,7 @@ def _run(config: dict, date_from: date, date_to: date) -> dict:
         try:
             count, fetched = _sync_account(
                 client, access_token, uid, date_from, date_to,
-                salary_names, default_currency,
+                salary_names,
             )
             summary["accounts_synced"] += 1
             summary["transactions_fired"] += count
@@ -101,10 +104,9 @@ def _sync_account(
     date_from: date,
     date_to: date,
     salary_names: list[str],
-    default_currency: str = "EUR",
 ) -> tuple[int, int]:
     """
-    Fetch, normalize, and fire webhooks for all transactions in the date range.
+    Fetch, enrich, and fire webhooks for all transactions in the date range.
     Returns (webhooks_fired_count, total_fetched_count).
     """
     raw = client.get_transactions(access_token, account_uid, date_from=date_from, date_to=date_to)
@@ -117,8 +119,7 @@ def _sync_account(
     fired_count = 0
 
     for raw_tx in booked_txs + pending_txs:
-        status = "booked" if raw_tx.get("status") == "BOOK" else "pending"
-        tx = _normalize_tx(raw_tx, account_uid, status=status, default_currency=default_currency)
+        tx = _enrich_tx(raw_tx, account_uid)
         tx["is_salary"] = _is_salary(tx, salary_names)
         webhooks.fire_new_transaction(tx)
         fired_count += 1
@@ -128,56 +129,29 @@ def _sync_account(
     return fired_count, total_fetched
 
 
-def _normalize_tx(raw: dict, account_uid: str, status: str, default_currency: str = "EUR") -> dict:
+def _camel_to_snake(name: str) -> str:
+    """Convert camelCase to snake_case."""
+    return re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", name).lower()
+
+
+def _normalize_keys(obj):
+    """Recursively normalise dict keys from camelCase to snake_case."""
+    if isinstance(obj, dict):
+        return {_camel_to_snake(k): _normalize_keys(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_normalize_keys(item) for item in obj]
+    return obj
+
+
+def _enrich_tx(raw: dict, account_uid: str) -> dict:
     """
-    Map the Enable Banking transaction JSON to our internal schema.
-    Enable Banking follows the Berlin Group / NextGenPSD2 naming conventions.
+    Normalise keys to snake_case and add enrichment fields (tx_hash, account_uid).
+    The original Enable Banking / Berlin Group structure is preserved as-is.
     """
-    amount_data = raw.get("transaction_amount", raw.get("transactionAmount", {}))
-    amount = float(amount_data.get("amount", 0))
-    currency = amount_data.get("currency", default_currency)
-
-    booking_date = (
-        raw.get("booking_date")
-        or raw.get("bookingDate")
-        or raw.get("value_date")
-        or raw.get("valueDate")
-    )
-    value_date = raw.get("value_date") or raw.get("valueDate")
-
-    debtor = raw.get("debtor") or {}
-    creditor = raw.get("creditor") or {}
-
-    debtor_name = debtor.get("name") or ""
-    creditor_name = creditor.get("name") or ""
-
-    reference = (
-        raw.get("remittance_information", [None])[0]
-        or raw.get("entry_reference")
-        or ""
-    )
-
-    description = reference
-
-    bank_id = raw.get("transaction_id") or raw.get("transactionId") or raw.get("entry_reference")
-
-    tx_hash = _make_tx_hash(amount, booking_date, debtor_name, creditor_name, reference)
-
-    return {
-        "tx_hash": tx_hash,
-        "bank_id": bank_id,
-        "account_uid": account_uid,
-        "amount": amount,
-        "currency": currency,
-        "status": status,
-        "booking_date": booking_date,
-        "value_date": value_date,
-        "debtor_name": debtor_name or None,
-        "creditor_name": creditor_name or None,
-        "reference": reference or None,
-        "description": description or None,
-        "raw_json": json.dumps(raw),
-    }
+    tx = _normalize_keys(raw)
+    tx["account_uid"] = account_uid
+    tx["tx_hash"] = _make_tx_hash(tx)
+    return tx
 
 
 def _normalize_account(raw: dict) -> dict:
@@ -194,11 +168,17 @@ def _normalize_account(raw: dict) -> dict:
 def _is_salary(tx: dict, salary_names: list[str]) -> bool:
     if not salary_names:
         return False
-    debtor = (tx.get("debtor_name") or "").lower()
+    debtor = (tx.get("debtor", {}).get("name") or "").lower()
     return any(name in debtor for name in salary_names)
 
 
-def _make_tx_hash(amount, booking_date, debtor_name, creditor_name, reference) -> str:
+def _make_tx_hash(tx: dict) -> str:
     """Deterministic hash for consumer-side deduplication."""
-    composite = f"{amount}|{booking_date or ''}|{debtor_name or ''}|{creditor_name or ''}|{reference or ''}"
+    amount = (tx.get("transaction_amount") or {}).get("amount", 0)
+    booking_date = tx.get("booking_date") or tx.get("value_date") or ""
+    debtor_name = (tx.get("debtor") or {}).get("name") or ""
+    creditor_name = (tx.get("creditor") or {}).get("name") or ""
+    remittance = tx.get("remittance_information") or []
+    reference = remittance[0] if remittance else ""
+    composite = f"{amount}|{booking_date}|{debtor_name}|{creditor_name}|{reference}"
     return hashlib.sha256(composite.encode()).hexdigest()

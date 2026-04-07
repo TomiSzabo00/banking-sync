@@ -75,13 +75,11 @@ def _deliver(endpoint: dict, event: str, body: str) -> None:
 # ── Convenience fire functions ────────────────────────────────────────────────
 
 def fire_new_transaction(tx: dict) -> None:
-    clean = {k: v for k, v in tx.items() if k != "raw_json"}
-    fire("new_transaction", clean)
+    fire("new_transaction", tx)
 
 
 def fire_salary_detected(tx: dict) -> None:
-    clean = {k: v for k, v in tx.items() if k != "raw_json"}
-    fire("salary_detected", {"transaction": clean})
+    fire("salary_detected", {"transaction": tx})
 
 
 def fire_sync_completed(account_uid: str, new_count: int, total_fetched: int) -> None:
