@@ -168,7 +168,7 @@ def _normalize_account(raw: dict) -> dict:
 def _is_salary(tx: dict, salary_names: list[str]) -> bool:
     if not salary_names:
         return False
-    debtor = (tx.get("debtor", {}).get("name") or "").lower()
+    debtor = ((tx.get("debtor") or {}).get("name") or "").lower()
     return any(name in debtor for name in salary_names)
 
 
