@@ -22,6 +22,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from flask import Flask
 
+import notifications
 import session_store
 import sync as sync_module
 import webhooks
@@ -64,6 +65,7 @@ def create_app(config: dict) -> Flask:
     session_path = config.get("session", {}).get("path", str(_BASE_DIR / "data" / "session.json"))
     session_store.init(session_path)
     webhooks.init(config)
+    notifications.init(config)
 
     app.register_blueprint(api_bp)
     return app

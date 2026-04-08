@@ -77,6 +77,20 @@ salary_detection:
 #   If "secret" is set, each request will include an
 #   X-Bank-Signature header: HMAC-SHA256(secret, request_body)
 # =============================================================================
+# =============================================================================
+# Notifications
+# Human-facing alerts via Home Assistant webhook.
+# Auth expiry always notifies. Sync notifications are gated by notify_sync.
+#
+# To get the webhook URL in HA:
+#   Settings → Automations → New Automation → Trigger: Webhook → copy URL
+# =============================================================================
+notifications:
+  homeassistant:
+    webhook_url: "http://homeassistant.local:8123/api/webhook/your-webhook-id"
+    # Set to true to receive a notification after every sync cycle
+    notify_sync: false
+
 webhooks:
   endpoints:
     - url: "https://yourdomain.com/webhook/salary"

@@ -17,6 +17,7 @@ import logging
 import re
 from datetime import date
 
+import notifications
 import session_store
 import webhooks
 from enablebanking_client import EnableBankingClient, EnableBankingError
@@ -49,6 +50,7 @@ def _run(config: dict, date_from: date, date_to: date) -> dict:
     if not session:
         logger.warning("No active session — re-authentication required")
         webhooks.fire_auth_required()
+        notifications.notify_auth_required()
         return {"error": "no_session", "message": "Re-authentication required. Visit /auth/start"}
 
     client = EnableBankingClient(
@@ -70,6 +72,7 @@ def _run(config: dict, date_from: date, date_to: date) -> dict:
             if exc.status_code == 401:
                 session_store.clear_session()
                 webhooks.fire_auth_required()
+                notifications.notify_auth_required()
                 return {"error": "session_expired"}
             return {"error": str(exc)}
 
@@ -85,13 +88,16 @@ def _run(config: dict, date_from: date, date_to: date) -> dict:
             summary["accounts_synced"] += 1
             summary["transactions_fired"] += count
             webhooks.fire_sync_completed(uid, count, fetched)
+            notifications.notify_sync_completed(uid, count, fetched)
             logger.info("Account %s — %d transactions fired (%d fetched)", uid, count, fetched)
         except EnableBankingError as exc:
             logger.error("Sync error for account %s: %s", uid, exc)
             if exc.status_code == 401:
                 session_store.clear_session()
                 webhooks.fire_auth_required()
+                notifications.notify_auth_required()
                 return {"error": "session_expired"}
+            notifications.notify_sync_failed(uid, str(exc))
             summary["errors"].append({"account_uid": uid, "error": str(exc)})
 
     return summary
