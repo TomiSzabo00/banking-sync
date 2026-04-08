@@ -139,13 +139,27 @@ if __name__ == "__main__":
     # Create app (inits session store + webhooks)
     app = create_app(config)
 
-    # Auto-sync is OFF by default — enable via POST /api/sync/enable
     session = session_store.get_session()
     if session:
         logger.info("Active session found (expires_at=%s)", session.get("expires_at"))
     else:
         logger.info("No session found — visit http://<YOUR_IP>:8080/auth/start to authenticate")
-    logger.info("Auto-sync is OFF by default. POST /api/sync/enable to start scheduled syncs.")
+
+    if config.get("sync", {}).get("auto_sync", False):
+        if session:
+            scheduler = start_scheduler(config)
+            _scheduler_ref["scheduler"] = scheduler
+            t = threading.Thread(
+                target=scheduled_sync,
+                kwargs={"config": config, "label": "startup"},
+                daemon=True,
+            )
+            t.start()
+            logger.info("Auto-sync enabled — scheduler started, catch-up sync running")
+        else:
+            logger.info("Auto-sync configured but no active session — skipping scheduler start")
+    else:
+        logger.info("Auto-sync is OFF. POST /api/sync/enable to start scheduled syncs.")
 
     # Start Flask
     server_cfg = config.get("server", {})
