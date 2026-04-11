@@ -60,6 +60,7 @@ def create_app(config: dict) -> Flask:
     app = Flask(__name__)
     app.secret_key = config.get("server", {}).get("secret_key", "changeme")
     app.config["APP_CONFIG"] = config
+    app.config["scheduler"] = None
 
     # Init session store and webhooks
     session_path = config.get("session", {}).get("path", str(_BASE_DIR / "data" / "session.json"))
@@ -74,7 +75,6 @@ def create_app(config: dict) -> Flask:
 # ── Scheduler ──────────────────────────────────────────────────────────────────
 
 _sync_lock = threading.Lock()
-_scheduler_ref: dict = {"scheduler": None}
 
 TZ = "UTC"
 
@@ -148,7 +148,7 @@ if __name__ == "__main__":
     if config.get("sync", {}).get("auto_sync", False):
         if session:
             scheduler = start_scheduler(config)
-            _scheduler_ref["scheduler"] = scheduler
+            app.config["scheduler"] = scheduler
             t = threading.Thread(
                 target=scheduled_sync,
                 kwargs={"config": config, "label": "startup"},

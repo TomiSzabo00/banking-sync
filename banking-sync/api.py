@@ -175,30 +175,29 @@ def backfill():
 
 @bp.post("/api/sync/enable")
 def enable_auto_sync():
-    from app import start_scheduler, _scheduler_ref
-    cfg = current_app.config["APP_CONFIG"]
-    if _scheduler_ref.get("scheduler") and _scheduler_ref["scheduler"].running:
+    from app import start_scheduler
+    scheduler = current_app.config.get("scheduler")
+    if scheduler and scheduler.running:
         return jsonify({"auto_sync": "already_enabled"})
+    cfg = current_app.config["APP_CONFIG"]
     scheduler = start_scheduler(cfg)
-    _scheduler_ref["scheduler"] = scheduler
+    current_app.config["scheduler"] = scheduler
     return jsonify({"auto_sync": "enabled"})
 
 
 @bp.post("/api/sync/disable")
 def disable_auto_sync():
-    from app import _scheduler_ref
-    scheduler = _scheduler_ref.get("scheduler")
+    scheduler = current_app.config.get("scheduler")
     if scheduler and scheduler.running:
         scheduler.shutdown(wait=False)
-        _scheduler_ref["scheduler"] = None
+        current_app.config["scheduler"] = None
         return jsonify({"auto_sync": "disabled"})
     return jsonify({"auto_sync": "already_disabled"})
 
 
 @bp.get("/api/sync/status")
 def sync_status():
-    from app import _scheduler_ref
-    scheduler = _scheduler_ref.get("scheduler")
+    scheduler = current_app.config.get("scheduler")
     return jsonify({
         "auto_sync_enabled": bool(scheduler and scheduler.running),
     })
