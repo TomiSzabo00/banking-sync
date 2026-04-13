@@ -31,11 +31,17 @@ enable_banking:
   redirect_url: "https://yourdomain.com/callback"
 
 sync:
-  # Timezone for the 4x/day auto-sync schedule.
+  # Timezone for the auto-sync schedule.
   timezone: "UTC"
   # Set to true to start the scheduler automatically on boot and run a catch-up
   # sync immediately. Requires an active session to take effect.
   auto_sync: false
+  # Sync times in 24h format (HH:MM), interpreted in the timezone above.
+  # Keep in mind a restart also triggers a catch-up sync when auto_sync is true,
+  # so budget one extra API call per restart when setting this.
+  schedule:
+    - "12:00"
+    - "23:00"
   # Default currency used when the bank doesn't provide one
   default_currency: "EUR"
   # Default start date for backfill (POST /api/sync/backfill)

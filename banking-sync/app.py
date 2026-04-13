@@ -78,12 +78,7 @@ _sync_lock = threading.Lock()
 
 TZ = "UTC"
 
-SYNC_SCHEDULE = [
-    ("08:00", "morning"),
-    ("13:30", "midday"),
-    ("18:30", "late_afternoon"),
-    ("23:59", "end_of_day"),
-]
+DEFAULT_SYNC_SCHEDULE = ["08:00", "13:30", "18:30", "23:59"]
 
 
 def scheduled_sync(config: dict, label: str = "auto") -> None:
@@ -102,15 +97,17 @@ def scheduled_sync(config: dict, label: str = "auto") -> None:
 
 
 def start_scheduler(config: dict) -> BackgroundScheduler:
+    schedule = config.get("sync", {}).get("schedule") or DEFAULT_SYNC_SCHEDULE
     scheduler = BackgroundScheduler(timezone=TZ)
 
-    for time_str, label in SYNC_SCHEDULE:
+    for i, time_str in enumerate(schedule):
         hour, minute = map(int, time_str.split(":"))
+        label = f"sync_{i+1}"
         scheduler.add_job(
             func=scheduled_sync,
             kwargs={"config": config, "label": label},
             trigger=CronTrigger(hour=hour, minute=minute, timezone=TZ),
-            id=f"sync_{label}",
+            id=label,
             replace_existing=True,
             max_instances=1,
         )
